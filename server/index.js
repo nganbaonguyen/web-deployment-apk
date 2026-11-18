@@ -116,7 +116,7 @@ const apps = createAppsStore({ root: ROOT });
 apps.register(app);
 app.use('/bundles', createBundleStatic(apps));
 const packagesRouter = createPackagesRouter();
-const bundlesRouter = createBundlesRouter({ readPublicUrl });
+const bundlesRouter = createBundlesRouter();
 app.use('/api/apps/:appId', apps.requireApp, packagesRouter, bundlesRouter);
 app.use('/api', apps.useDefaultApp, packagesRouter, bundlesRouter);
 

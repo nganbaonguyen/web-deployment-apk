@@ -97,7 +97,7 @@ function findBundleRoot(dir) {
 }
 
 /** API bundle của một ứng dụng: gắn vào /api (mặc định) hoặc /api/apps/:appId. */
-export function createBundlesRouter({ readPublicUrl }) {
+export function createBundlesRouter() {
   const router = express.Router();
 
   const tarUpload = multer({
@@ -116,7 +116,13 @@ export function createBundlesRouter({ readPublicUrl }) {
     },
   });
 
-  const baseUrlFor = (req) => readPublicUrl() || `${req.protocol}://${req.get('host')}`;
+  // Dùng chính địa chỉ mà client vừa gọi tới (điện thoại gọi bằng IP LAN thì nhận lại IP LAN, qua tunnel https thì nhận
+  // https), không dùng .public-url cũ: địa chỉ tunnel đổi mỗi lần chạy nên dễ lỗi thời.
+  const baseUrlFor = (req) => {
+    const proto = (req.get('x-forwarded-proto') || req.protocol).split(',')[0].trim();
+    const host = (req.get('x-forwarded-host') || req.get('host')).split(',')[0].trim();
+    return `${proto}://${host}`;
+  };
 
   router.get('/bundles', (req, res) => {
     const modules = Object.values(readRegistry(req.appCtx).modules)
