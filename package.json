@@ -1,0 +1,28 @@
+{
+  "name": "web-deployment-apk",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "NODE_ENV=development node server/index.js",
+    "mobile": "npm run build && MOBILE=1 NODE_ENV=production node server/index.js",
+    "phone": "npm run build && node scripts/phone.js",
+    "share": "node scripts/phone.js",
+    "android": "npm run build && node scripts/android.js",
+    "start": "npm run build && NODE_ENV=production node server/index.js",
+    "build": "vite build"
+  },
+  "dependencies": {
+    "cors": "^2.8.5",
+    "express": "^4.21.2",
+    "multer": "^1.4.5-lts.1",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-react": "^4.3.4",
+    "concurrently": "^9.1.2",
+    "qrcode-terminal": "^0.12.0",
+    "vite": "^6.0.3"
+  }
+}
