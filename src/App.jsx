@@ -1,4 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
+import BundlesPanel from './Bundles';
+import { AddAppModal, AppSwitcher } from './Apps';
 
 const CREATOR = 'Nguyễn Bảo Ngân';
 const AVATAR = '/avatar.png';
@@ -95,6 +97,15 @@ function IconBolt() {
   );
 }
 
+function IconLayers() {
+  return (
+    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M12 3l9 5-9 5-9-5 9-5z" />
+      <path d="M3 13l9 5 9-5M3 17.5l9 5 9-5" />
+    </svg>
+  );
+}
+
 function IconRocket() {
   return (
     <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
@@ -121,7 +132,29 @@ export default function App() {
   const [highlightId, setHighlightId] = useState(null);
   const [inputKey, setInputKey] = useState({ android: 0, ios: 0 });
   const [activationReady, setActivationReady] = useState(null);
+  const [view, setView] = useState(() => {
+    try {
+      if (window.location.hash === '#bundles') return 'bundles';
+      return sessionStorage.getItem('appDeploy_view') === 'bundles' ? 'bundles' : 'apps';
+    } catch {
+      return 'apps';
+    }
+  });
+  const [apps, setApps] = useState([]);
+  const [appId, setAppId] = useState(() => {
+    try {
+      return localStorage.getItem('appDeploy_app') || 'electrogo';
+    } catch {
+      return 'electrogo';
+    }
+  });
+  const [addAppOpen, setAddAppOpen] = useState(false);
   const listRef = useRef(null);
+  const baseRef = useRef('/api'); // ứng dụng đang chọn, để bỏ qua kết quả trả về trễ của ứng dụng cũ
+
+  const currentApp = apps.find((a) => a.id === appId) || apps[0] || null;
+  // Ứng dụng mặc định giữ URL cũ (/api/...), các ứng dụng khác dùng /api/apps/<id>/...
+  const apiBase = !currentApp || currentApp.isDefault ? '/api' : `/api/apps/${currentApp.id}`;
 
   function normalizePackagesPayload(data) {
     if (Array.isArray(data)) {
@@ -182,9 +215,11 @@ export default function App() {
   }, []);
 
   const fetchPackages = useCallback(async () => {
+    baseRef.current = apiBase;
     try {
-      const res = await fetch('/api/packages');
+      const res = await fetch(`${apiBase}/packages`);
       const data = await parseJsonResponse(res);
+      if (baseRef.current !== apiBase) return;
       const { list, supportsActivation } = normalizePackagesPayload(data);
       setPackages(list);
       if (supportsActivation) setActivationReady(true);
@@ -198,13 +233,63 @@ export default function App() {
     } catch {
       setError('Không kết nối được server. Chạy: npm run mobile');
     } finally {
-      setLoading(false);
+      if (baseRef.current === apiBase) setLoading(false);
+    }
+  }, [apiBase]);
+
+  // Đổi ứng dụng: xóa dữ liệu của ứng dụng cũ rồi tải lại
+  useEffect(() => {
+    setPackages([]);
+    setLastUploaded(null);
+    setFreshUpload(false);
+    setLoading(true);
+    fetchPackages();
+  }, [fetchPackages]);
+
+  const loadApps = useCallback(async () => {
+    try {
+      const res = await fetch('/api/apps');
+      const data = await res.json();
+      setApps(data.apps || []);
+      return data.apps || [];
+    } catch {
+      return [];
     }
   }, []);
 
   useEffect(() => {
-    fetchPackages();
-  }, [fetchPackages]);
+    loadApps().then((list) => {
+      // Ứng dụng đã lưu không còn nữa thì quay về ứng dụng đầu tiên
+      if (list.length && !list.some((a) => a.id === appId)) setAppId(list[0].id);
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [loadApps]);
+
+  const selectApp = (id) => {
+    setAppId(id);
+    try {
+      localStorage.setItem('appDeploy_app', id);
+    } catch {
+      /* ignore */
+    }
+    setMessage(null);
+    setError(null);
+    switchView('apps'); // chọn ứng dụng thì mở tab Tổng quan của ứng dụng đó
+  };
+
+  const deleteApp = async (a) => {
+    if (!window.confirm(`Xóa ứng dụng "${a.name}" cùng toàn bộ gói APK/IPA và bundle của nó? Không thể hoàn tác.`)) return;
+    try {
+      const res = await fetch(`/api/apps/${encodeURIComponent(a.id)}`, { method: 'DELETE' });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.error || 'Xóa ứng dụng thất bại');
+      setMessage(data.message);
+      const list = await loadApps();
+      if (a.id === appId) selectApp(list[0]?.id || 'electrogo');
+    } catch (err) {
+      setError(err.message);
+    }
+  };
 
   const uploadFile = async (file, platform) => {
     if (!file) return;
@@ -231,7 +316,7 @@ export default function App() {
     const timeout = setTimeout(() => controller.abort(), 15 * 60 * 1000);
 
     try {
-      const res = await fetch('/api/upload', {
+      const res = await fetch(`${apiBase}/upload`, {
         method: 'POST',
         body: formData,
         signal: controller.signal,
@@ -295,7 +380,7 @@ export default function App() {
   const handleDelete = async (id, name) => {
     if (!window.confirm(`Gỡ bỏ "${name}" khỏi kho phân phối?`)) return;
     try {
-      const res = await fetch(`/api/packages/${encodeURIComponent(id)}`, { method: 'DELETE' });
+      const res = await fetch(`${apiBase}/packages/${encodeURIComponent(id)}`, { method: 'DELETE' });
       if (!res.ok) throw new Error('Xóa thất bại');
       setMessage('Đã gỡ bỏ gói ứng dụng');
       if (lastUploaded?.id === id) {
@@ -331,7 +416,7 @@ export default function App() {
     );
 
     try {
-      const res = await fetch(`/api/packages/${encodeURIComponent(pkg.id)}/active`, {
+      const res = await fetch(`${apiBase}/packages/${encodeURIComponent(pkg.id)}/active`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ active: turnOn }),
@@ -416,8 +501,24 @@ export default function App() {
   const visible = q ? filtered.filter((p) => p.name.toLowerCase().includes(q)) : filtered;
   const activeCount = packages.filter((p) => p.active).length;
 
+  const switchView = (next) => {
+    setView(next);
+    try {
+      sessionStorage.setItem('appDeploy_view', next);
+    } catch {
+      /* ignore */
+    }
+    window.scrollTo({ top: 0 });
+  };
+
   const scrollTo = (id) => (e) => {
     e.preventDefault();
+    if (view !== 'apps') {
+      // Đang ở tab Bundle: quay về tab APK/IPA rồi mới cuộn tới mục
+      switchView('apps');
+      setTimeout(() => document.getElementById(id)?.scrollIntoView({ behavior: 'smooth', block: 'start' }), 60);
+      return;
+    }
     document.getElementById(id)?.scrollIntoView({ behavior: 'smooth', block: 'start' });
   };
 
@@ -427,6 +528,23 @@ export default function App() {
     { id: 'library', label: 'Kho phân phối', icon: <IconBox /> },
     { id: 'mobile', label: 'Truy cập di động', icon: <IconPhone /> },
   ];
+
+  const feedback = (
+    <>
+      {(message || error) && (
+        <div
+          className={`alert ${error ? 'alert-error' : 'alert-success'}`}
+          onClick={() => {
+            setMessage(null);
+            setError(null);
+          }}
+          role="status"
+        >
+          {error || message}
+        </div>
+      )}
+    </>
+  );
 
   const stats = [
     { label: 'Tổng phát hành', value: packages.length, icon: <IconBox />, tone: 'blue' },
@@ -448,15 +566,43 @@ export default function App() {
           </div>
         </div>
 
+        <AppSwitcher
+          apps={apps}
+          currentId={currentApp?.id}
+          onSelect={selectApp}
+          onAdd={() => setAddAppOpen(true)}
+          onDelete={deleteApp}
+        />
+
         <nav className="nav" aria-label="Điều hướng">
-          <p className="nav__label">Menu</p>
+          <p className="nav__label">Menu{currentApp ? ` · ${currentApp.name}` : ''}</p>
           {navItems.map((n) => (
-            <a key={n.id} href={`#${n.id}`} className="nav__item" onClick={scrollTo(n.id)}>
+            <a
+              key={n.id}
+              href={`#${n.id}`}
+              className={`nav__item ${view === 'apps' && n.id === 'overview' ? 'is-current' : ''}`}
+              onClick={scrollTo(n.id)}
+            >
               <span className="nav__icon">{n.icon}</span>
               {n.label}
             </a>
           ))}
+          <p className="nav__label nav__label--gap">Mini app</p>
+          <a
+            href="#bundles"
+            className={`nav__item ${view === 'bundles' ? 'is-current' : ''}`}
+            onClick={(e) => {
+              e.preventDefault();
+              switchView('bundles');
+            }}
+          >
+            <span className="nav__icon">
+              <IconLayers />
+            </span>
+            Bundle mini app
+          </a>
         </nav>
+
 
         <div className="sidebar__bottom">
           <div className="status-card">
@@ -477,9 +623,18 @@ export default function App() {
       </aside>
 
       <div className="main">
+        {view === 'bundles' ? (
+          <>
+            {feedback}
+            <BundlesPanel key={apiBase} apiBase={apiBase} appName={currentApp?.name} onMessage={setMessage} onError={setError} />
+          </>
+        ) : (
+        <>
         <header className="topbar" id="overview">
           <div>
-            <h1 className="topbar__title">Tổng quan phát hành</h1>
+            <h1 className="topbar__title">
+              Tổng quan phát hành {currentApp && <span className="app-chip">{currentApp.name}</span>}
+            </h1>
             <p className="topbar__sub">
               Phân phối <b>APK</b> &amp; <b>IPA</b> — nội bộ, hotspot hoặc link bảo mật.
             </p>
@@ -499,18 +654,7 @@ export default function App() {
           </div>
         )}
 
-        {(message || error) && (
-          <div
-            className={`alert ${error ? 'alert-error' : 'alert-success'}`}
-            onClick={() => {
-              setMessage(null);
-              setError(null);
-            }}
-            role="status"
-          >
-            {error || message}
-          </div>
-        )}
+        {feedback}
 
         <section className="stats">
           {stats.map((s) => (
@@ -767,12 +911,28 @@ export default function App() {
             </div>
           )}
         </section>
+        </>
+        )}
 
         <footer className="footer">
           <span>Sản phẩm thuộc tạo bởi {CREATOR}</span>
           <span>© {new Date().getFullYear()} App Deploy Pro · Confidential distribution</span>
         </footer>
       </div>
+
+      {addAppOpen && (
+        <AddAppModal
+          count={apps.length}
+          onClose={() => setAddAppOpen(false)}
+          onError={setError}
+          onDone={async (created, msg) => {
+            setAddAppOpen(false);
+            await loadApps();
+            selectApp(created.id);
+            setMessage(msg);
+          }}
+        />
+      )}
     </div>
   );
 }

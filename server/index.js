@@ -1,19 +1,20 @@
 import express from 'express';
 import cors from 'cors';
-import multer from 'multer';
 import os from 'os';
 import path from 'path';
 import fs from 'fs';
 import { fileURLToPath } from 'url';
 import { createRequire } from 'module';
 import { createServer as createViteServer } from 'vite';
+import { createAppsStore } from './apps.js';
+import { createPackagesRouter } from './packages.js';
+import { createBundlesRouter, createBundleStatic } from './bundles.js';
 
 const require = createRequire(import.meta.url);
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.join(__dirname, '..');
 const UPLOAD_DIR = path.join(ROOT, 'uploads');
-const ACTIVE_FILE = path.join(UPLOAD_DIR, '.active-package.json');
 const DIST_DIR = path.join(ROOT, 'dist');
 const forceProduction = process.env.MOBILE === '1' || process.env.NODE_ENV === 'production';
 const isDev = !forceProduction && process.env.NODE_ENV !== 'production';
@@ -24,100 +25,9 @@ if (!fs.existsSync(UPLOAD_DIR)) {
   fs.mkdirSync(UPLOAD_DIR, { recursive: true });
 }
 
-const storage = multer.diskStorage({
-  destination: (_req, _file, cb) => cb(null, UPLOAD_DIR),
-  filename: (_req, file, cb) => {
-    const safeName = file.originalname.replace(/[^a-zA-Z0-9._-]/g, '_');
-    cb(null, `${Date.now()}-${safeName}`);
-  },
-});
-
-function getPackageType(filename) {
-  const lower = filename.toLowerCase();
-  if (lower.endsWith('.apk')) return 'android';
-  if (lower.endsWith('.ipa')) return 'ios';
-  return null;
-}
-
-function isAppPackage(filename) {
-  return getPackageType(filename) !== null;
-}
-
-const upload = multer({
-  storage,
-  limits: { fileSize: 500 * 1024 * 1024 },
-  fileFilter: (_req, file, cb) => {
-    if (isAppPackage(file.originalname)) {
-      cb(null, true);
-    } else {
-      cb(new Error('Chỉ chấp nhận file .apk hoặc .ipa'));
-    }
-  },
-});
-
 const app = express();
 app.use(cors());
 app.use(express.json());
-
-function resolvePackageFile(id) {
-  const decoded = decodeURIComponent(id);
-  const filePath = path.join(UPLOAD_DIR, path.basename(decoded));
-  if (!fs.existsSync(filePath) || !isAppPackage(path.basename(filePath))) return null;
-  return filePath;
-}
-
-function getMimeType(filename) {
-  return getPackageType(filename) === 'ios'
-    ? 'application/octet-stream'
-    : 'application/vnd.android.package-archive';
-}
-
-function formatSize(bytes) {
-  if (bytes < 1024) return `${bytes} B`;
-  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
-  return `${(bytes / (1024 * 1024)).toFixed(2)} MB`;
-}
-
-function readActiveId() {
-  try {
-    const raw = fs.readFileSync(ACTIVE_FILE, 'utf8');
-    const data = JSON.parse(raw);
-    const id = data?.activeId;
-    if (!id || typeof id !== 'string') return null;
-    const filePath = path.join(UPLOAD_DIR, path.basename(id));
-    if (!fs.existsSync(filePath) || !isAppPackage(path.basename(id))) {
-      clearActiveId();
-      return null;
-    }
-    return path.basename(id);
-  } catch {
-    return null;
-  }
-}
-
-function setActiveId(id) {
-  const base = path.basename(id);
-  const filePath = path.join(UPLOAD_DIR, base);
-  if (!fs.existsSync(filePath) || !isAppPackage(base)) {
-    throw new Error('Gói không tồn tại');
-  }
-  fs.writeFileSync(ACTIVE_FILE, JSON.stringify({ activeId: base }, null, 2));
-  return base;
-}
-
-function clearActiveId() {
-  try {
-    if (fs.existsSync(ACTIVE_FILE)) fs.unlinkSync(ACTIVE_FILE);
-  } catch {
-    /* ignore */
-  }
-}
-
-function isPackageActive(id) {
-  const activeId = readActiveId();
-  if (!activeId) return false;
-  return path.basename(id) === activeId;
-}
 
 const SKIP_IFACE = /^(lo\d*|utun|tun\d|tap\d|awdl|llw|vmenet|docker|veth|gif|stf)/i;
 
@@ -196,138 +106,19 @@ app.get('/api/health', (_req, res) => {
   res.json({ ok: true, features: { packageActivation: true }, ...getNetworkInfo() });
 });
 
-app.get('/api/download/:id', (req, res) => {
-  const filePath = resolvePackageFile(req.params.id);
-  if (!filePath) {
-    return res.status(404).json({ error: 'File không tồn tại' });
-  }
-  if (!isPackageActive(req.params.id)) {
-    return res.status(403).json({
-      error: 'Gói chưa được kích hoạt. Bật kích hoạt trong kho phân phối để cho phép tải.',
-    });
-  }
-  const filename = path.basename(filePath).replace(/^\d+-/, '');
-  res.setHeader('Content-Type', getMimeType(filename));
-  res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
-  res.sendFile(filePath);
-});
-
-function listPackages() {
-  const activeId = readActiveId();
-  const files = fs.readdirSync(UPLOAD_DIR).filter((f) => isAppPackage(f));
-  return files.map((filename) => {
-    const filePath = path.join(UPLOAD_DIR, filename);
-    const stat = fs.statSync(filePath);
-    const displayName = filename.replace(/^\d+-/, '');
-    const platform = getPackageType(displayName);
-    return {
-      id: filename,
-      name: displayName,
-      platform,
-      active: filename === activeId,
-      size: formatSize(stat.size),
-      sizeBytes: stat.size,
-      uploadedAt: stat.mtime.toISOString(),
-      downloadUrl: `/api/download/${encodeURIComponent(filename)}`,
-    };
-  });
-}
-
 app.get('/api/network', (_req, res) => {
   res.json(getNetworkInfo());
 });
 
-app.get('/api/packages', (_req, res) => {
-  const list = listPackages();
-  list.sort((a, b) => new Date(b.uploadedAt) - new Date(a.uploadedAt));
-  const activeId = readActiveId();
-  res.json({ packages: list, activeId });
-});
-
-app.get('/api/apks', (_req, res) => {
-  const list = listPackages().filter((p) => p.platform === 'android');
-  res.json(list);
-});
-
-app.post('/api/upload', upload.fields([
-  { name: 'file', maxCount: 1 },
-  { name: 'apk', maxCount: 1 },
-  { name: 'ipa', maxCount: 1 },
-]), (req, res) => {
-  const uploaded =
-    req.files?.file?.[0] || req.files?.apk?.[0] || req.files?.ipa?.[0] || req.file;
-
-  if (!uploaded) {
-    return res.status(400).json({ error: 'Không có file được gửi lên (.apk hoặc .ipa)' });
-  }
-
-  const platform = getPackageType(uploaded.originalname);
-  if (!platform) {
-    return res.status(400).json({ error: 'Chỉ chấp nhận file .apk hoặc .ipa' });
-  }
-
-  setActiveId(uploaded.filename);
-
-  res.json({
-    message: 'Upload thành công',
-    file: {
-      id: uploaded.filename,
-      name: uploaded.originalname,
-      platform,
-      active: true,
-      size: formatSize(uploaded.size),
-      downloadUrl: `/api/download/${encodeURIComponent(uploaded.filename)}`,
-    },
-  });
-});
-
-function handlePackageActive(req, res) {
-  const id = path.basename(decodeURIComponent(req.params.id));
-  const filePath = path.join(UPLOAD_DIR, id);
-  if (!fs.existsSync(filePath) || !isAppPackage(id)) {
-    return res.status(404).json({ error: 'Gói không tồn tại' });
-  }
-
-  const wantActive = req.body?.active !== false;
-
-  try {
-    if (wantActive) {
-      setActiveId(id);
-    } else if (isPackageActive(id)) {
-      clearActiveId();
-    }
-  } catch (err) {
-    return res.status(500).json({ error: err.message || 'Không lưu được trạng thái kích hoạt' });
-  }
-
-  res.json({
-    message: wantActive ? 'Đã kích hoạt gói phân phối' : 'Đã tắt kích hoạt — không thể tải gói này',
-    activeId: readActiveId(),
-  });
-}
-
-app.post('/api/packages/:id/active', handlePackageActive);
-app.patch('/api/packages/:id/active', handlePackageActive);
-
-app.delete('/api/packages/:id', (req, res) => {
-  const base = path.basename(decodeURIComponent(req.params.id));
-  const filePath = path.join(UPLOAD_DIR, base);
-  if (!fs.existsSync(filePath)) {
-    return res.status(404).json({ error: 'File không tồn tại' });
-  }
-  if (isPackageActive(base)) clearActiveId();
-  fs.unlinkSync(filePath);
-  res.json({ message: 'Đã xóa file' });
-});
-
-app.delete('/api/apks/:id', (req, res) => {
-  const filePath = path.join(UPLOAD_DIR, path.basename(decodeURIComponent(req.params.id)));
-  if (!fs.existsSync(filePath)) {
-    return res.status(404).json({ error: 'File không tồn tại' });
-  }
-  fs.unlinkSync(filePath);
-  res.json({ message: 'Đã xóa file' });
-});
+// Nhiều ứng dụng: /api/apps (danh sách, thêm, xóa), /api/apps/:appId/... cho từng ứng dụng.
+// /api/... (không có /apps/<id>) luôn là ứng dụng mặc định, giữ link đã phát hành hoạt động.
+const apps = createAppsStore({ root: ROOT });
+apps.register(app);
+app.use('/bundles', createBundleStatic(apps));
+const packagesRouter = createPackagesRouter();
+const bundlesRouter = createBundlesRouter({ readPublicUrl });
+app.use('/api/apps/:appId', apps.requireApp, packagesRouter, bundlesRouter);
+app.use('/api', apps.useDefaultApp, packagesRouter, bundlesRouter);
 
 app.use((err, _req, res, _next) => {
   if (err.code === 'LIMIT_FILE_SIZE') {

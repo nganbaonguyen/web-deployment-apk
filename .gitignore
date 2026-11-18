@@ -3,3 +3,6 @@ yarn.lock
 .yarn-integrity
 .DS_Store
 *.textClipping
+bundles/
+data/
+uploads/apps/
