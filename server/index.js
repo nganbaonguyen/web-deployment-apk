@@ -5,10 +5,11 @@ import path from 'path';
 import fs from 'fs';
 import { fileURLToPath } from 'url';
 import { createRequire } from 'module';
-import { createServer as createViteServer } from 'vite';
 import { createAppsStore } from './apps.js';
+import { createAdminAuth } from './auth.js';
 import { createPackagesRouter } from './packages.js';
 import { createBundlesRouter, createBundleStatic } from './bundles.js';
+import { createPagesPublisher } from './pages.js';
 
 const require = createRequire(import.meta.url);
 
@@ -26,8 +27,15 @@ if (!fs.existsSync(UPLOAD_DIR)) {
 }
 
 const app = express();
+app.set('trust proxy', true); // đứng sau Caddy/Nginx: lấy đúng https và domain thật
 app.use(cors());
 app.use(express.json());
+
+// Kiểm tra server sống (Docker healthcheck); luôn công khai, không lộ thông tin mạng
+app.get('/healthz', (_req, res) => res.json({ ok: true }));
+
+// Có ADMIN_PASSWORD thì giao diện và API ghi phải đăng nhập (xem server/auth.js)
+app.use(createAdminAuth({ user: process.env.ADMIN_USER || 'admin', password: process.env.ADMIN_PASSWORD || '' }));
 
 const SKIP_IFACE = /^(lo\d*|utun|tun\d|tap\d|awdl|llw|vmenet|docker|veth|gif|stf)/i;
 
@@ -114,6 +122,10 @@ app.get('/api/network', (_req, res) => {
 // /api/... (không có /apps/<id>) luôn là ứng dụng mặc định, giữ link đã phát hành hoạt động.
 const apps = createAppsStore({ root: ROOT });
 apps.register(app);
+// Đưa bundle lên GitHub Pages để app nạp được ở mọi mạng (xem server/pages.js)
+const pages = createPagesPublisher({ root: ROOT, apps });
+app.set('pages', pages);
+pages.register(app);
 app.use('/bundles', createBundleStatic(apps));
 const packagesRouter = createPackagesRouter();
 const bundlesRouter = createBundlesRouter();
@@ -132,6 +144,8 @@ app.use((err, _req, res, _next) => {
 
 async function setupFrontend() {
   if (isDev) {
+    // Import tại chỗ: bản production (Docker) không cài vite
+    const { createServer: createViteServer } = await import('vite');
     const vite = await createViteServer({
       root: ROOT,
       server: {

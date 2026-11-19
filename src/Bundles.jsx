@@ -360,52 +360,55 @@ function DeclareModal({ onClose, onDone, onError }) {
 function HistoryModal({ mod, onClose, onSaved, onError, onChanged }) {
   const api = useContext(ApiContext);
   const initial = useMemo(
-    () => Object.fromEntries(mod.versions.map((v) => [v.version, { staging: v.staging, prod: v.prod, active: v.active }])),
+    () =>
+      Object.fromEntries(
+        mod.versions.map((v) => [v.id, { staging: v.staging, prod: v.prod, live: !!v.live, active: v.active }])
+      ),
     [mod]
   );
   const [draft, setDraft] = useState(initial);
-  const [live, setLive] = useState(mod.live);
   const [saving, setSaving] = useState(false);
 
-  const dirty = live !== mod.live || mod.versions.some((v) => {
-    const d = draft[v.version];
-    return d.staging !== v.staging || d.prod !== v.prod || d.active !== v.active;
-  });
+  const changed = (v) => {
+    const d = draft[v.id];
+    return d.staging !== v.staging || d.prod !== v.prod || d.live !== !!v.live || d.active !== v.active;
+  };
+  const dirty = mod.versions.some(changed);
 
-  const setFlag = (version, flag, value) =>
-    setDraft((prev) => ({ ...prev, [version]: { ...prev[version], [flag]: value } }));
+  // Danh sách đã xếp mới nhất lên đầu. Nhiều bản cùng tick thì app nhận bản trên cùng; bỏ tick thì quay về bản tick kế tiếp.
+  const servedId = (flag) => mod.versions.find((v) => draft[v.id].active && draft[v.id][flag])?.id || null;
+  const liveId = servedId('live');
 
-  const toggleLive = (version, on) => {
-    if (on) {
-      setLive(version);
-      setFlag(version, 'active', true); // bản LIVE phải Active
-    } else if (live === version) {
-      setLive(null);
-    }
+  const setFlag = (id, flag, value) =>
+    setDraft((prev) => ({ ...prev, [id]: { ...prev[id], [flag]: value } }));
+
+  const toggleLive = (id, on) => {
+    setFlag(id, 'live', on);
+    if (on) setFlag(id, 'active', true); // bản LIVE phải Active
   };
 
-  const toggleActive = (version, on) => {
-    setFlag(version, 'active', on);
-    if (!on && live === version) setLive(null); // tắt Active thì không còn LIVE
+  const toggleActive = (id, on) => {
+    setFlag(id, 'active', on);
+    if (!on) setFlag(id, 'live', false); // tắt Active thì không còn LIVE
   };
 
   const save = async () => {
-    const changes = mod.versions
-      .filter((v) => {
-        const d = draft[v.version];
-        return d.staging !== v.staging || d.prod !== v.prod || d.active !== v.active;
-      })
-      .map((v) => ({ version: v.version, ...draft[v.version] }));
+    const changes = mod.versions.filter(changed).map((v) => ({ id: v.id, ...draft[v.id] }));
     setSaving(true);
     try {
       await readJson(
         await fetch(`${api}/bundles/${encodeURIComponent(mod.key)}/versions`, {
           method: 'PATCH',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ changes, live }),
+          body: JSON.stringify({ changes }),
         })
       );
-      onSaved(live ? `${mod.label}: đã đặt LIVE v${live}` : `${mod.label}: đã lưu — hiện không có bản LIVE`);
+      const served = mod.versions.find((v) => v.id === liveId);
+      onSaved(
+        served
+          ? `${mod.label}: đã lưu — LIVE đang là v${served.version}${served.build > 1 ? ` (bản build ${served.build})` : ''}`
+          : `${mod.label}: đã lưu — hiện không có bản LIVE`
+      );
     } catch (err) {
       onError(err.message);
     } finally {
@@ -414,14 +417,14 @@ function HistoryModal({ mod, onClose, onSaved, onError, onChanged }) {
   };
 
   const remove = async (v) => {
-    if (!window.confirm(`Xóa phiên bản ${v.version} của "${mod.label}"? File bundle sẽ bị xóa khỏi server.`)) return;
+    if (!window.confirm(`Xóa phiên bản ${v.version}${v.build > 1 ? ` (bản build ${v.build})` : ''} của "${mod.label}"? File bundle sẽ bị xóa khỏi server.`)) return;
     try {
       await readJson(
-        await fetch(`${api}/bundles/${encodeURIComponent(mod.key)}/versions/${encodeURIComponent(v.version)}`, {
+        await fetch(`${api}/bundles/${encodeURIComponent(mod.key)}/versions/${encodeURIComponent(v.id)}`, {
           method: 'DELETE',
         })
       );
-      onChanged(`Đã xóa ${mod.key} v${v.version}`);
+      onChanged(`Đã xóa ${mod.key} v${v.version}${v.build > 1 ? ` (build ${v.build})` : ''}`);
     } catch (err) {
       onError(err.message);
     }
@@ -434,7 +437,7 @@ function HistoryModal({ mod, onClose, onSaved, onError, onChanged }) {
       subtitle={`${mod.label} · lịch sử phiên bản`}
       hint={
         <>
-          Tick <b>LIVE</b> để chọn bản phục vụ người dùng
+          Tick <b>LIVE</b>: app nhận bản tick trên cùng. Bỏ tick thì quay về bản tick bên dưới.
         </>
       }
       onClose={saving ? () => {} : onClose}
@@ -470,12 +473,13 @@ function HistoryModal({ mod, onClose, onSaved, onError, onChanged }) {
           </thead>
           <tbody>
             {mod.versions.map((v) => {
-              const d = draft[v.version];
-              const isLive = live === v.version;
+              const d = draft[v.id];
+              const isLive = liveId === v.id; // bản đang được app nhận
               return (
-                <tr key={v.version} className={isLive ? 'bd-row--live' : ''}>
+                <tr key={v.id} className={isLive ? 'bd-row--live' : ''}>
                   <td>
                     <strong className="bd-ver">v{v.version}</strong>
+                    {v.build > 1 && <span className="bd-tag"> build {v.build}</span>}
                     {isLive && <span className="bd-live-tag">LIVE</span>}
                   </td>
                   <td className="bd-file" title={v.file}>
@@ -493,15 +497,15 @@ function HistoryModal({ mod, onClose, onSaved, onError, onChanged }) {
                   <td>
                     <div className="bd-envs">
                       <label className="bd-env">
-                        <input type="checkbox" checked={d.staging} onChange={(e) => setFlag(v.version, 'staging', e.target.checked)} />
+                        <input type="checkbox" checked={d.staging} onChange={(e) => setFlag(v.id, 'staging', e.target.checked)} />
                         <span>STAGING</span>
                       </label>
                       <label className="bd-env">
-                        <input type="checkbox" checked={d.prod} onChange={(e) => setFlag(v.version, 'prod', e.target.checked)} />
+                        <input type="checkbox" checked={d.prod} onChange={(e) => setFlag(v.id, 'prod', e.target.checked)} />
                         <span>PROD</span>
                       </label>
                       <label className="bd-env bd-env--live">
-                        <input type="checkbox" checked={isLive} onChange={(e) => toggleLive(v.version, e.target.checked)} />
+                        <input type="checkbox" checked={d.live} onChange={(e) => toggleLive(v.id, e.target.checked)} />
                         <span>LIVE</span>
                       </label>
                     </div>
@@ -512,7 +516,7 @@ function HistoryModal({ mod, onClose, onSaved, onError, onChanged }) {
                         type="checkbox"
                         className="activate-toggle__input"
                         checked={d.active}
-                        onChange={(e) => toggleActive(v.version, e.target.checked)}
+                        onChange={(e) => toggleActive(v.id, e.target.checked)}
                       />
                       <span className="activate-toggle__track" aria-hidden="true" />
                       <span className="activate-toggle__label">{d.active ? 'Active' : 'Tắt'}</span>
@@ -535,6 +539,121 @@ function HistoryModal({ mod, onClose, onSaved, onError, onChanged }) {
         </table>
       </div>
     </Modal>
+  );
+}
+
+/* ─── Khung "GitHub Pages": đưa bundle lên địa chỉ cố định để app nạp được ở mọi mạng ─── */
+function PagesCard({ onMessage, onError }) {
+  const [cfg, setCfg] = useState(null);
+  const [repo, setRepo] = useState('');
+  const [auto, setAuto] = useState(true);
+  const [busy, setBusy] = useState(false);
+
+  const load = useCallback(async () => {
+    try {
+      const data = await readJson(await fetch('/api/pages'));
+      setCfg(data);
+      return data;
+    } catch (err) {
+      onError(err.message);
+      return null;
+    }
+  }, [onError]);
+
+  useEffect(() => {
+    load().then((d) => {
+      if (d) {
+        setRepo(d.repo || '');
+        setAuto(d.auto);
+      }
+    });
+  }, [load]);
+
+  const state = cfg?.status?.state;
+  useEffect(() => {
+    if (state !== 'queued' && state !== 'publishing') return undefined;
+    const t = setInterval(load, 2500);
+    return () => clearInterval(t);
+  }, [state, load]);
+
+  const save = async () => {
+    setBusy(true);
+    try {
+      const data = await readJson(
+        await fetch('/api/pages', {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ repo, auto }),
+        }),
+      );
+      setCfg(data);
+      onMessage('Đã lưu cấu hình GitHub Pages');
+    } catch (err) {
+      onError(err.message);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const publish = async () => {
+    setBusy(true);
+    try {
+      const data = await readJson(await fetch('/api/pages/publish', { method: 'POST' }));
+      setCfg(data);
+      onMessage(data.message || 'Đã đưa lên Pages');
+    } catch (err) {
+      onError(err.message);
+      await load();
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  if (!cfg) return null;
+  const st = cfg.status || {};
+  const stateLabel =
+    { idle: 'Chưa đẩy', queued: 'Đang chờ', publishing: 'Đang đẩy...', ok: 'Đã đưa lên', error: 'Lỗi' }[st.state] || '';
+
+  return (
+    <section className="card pages-card">
+      <div className="card__head">
+        <h2>
+          GitHub Pages <span className={`pages-state pages-state--${st.state || 'idle'}`}>{stateLabel}</span>
+        </h2>
+        <p>
+          Bundle LIVE được đưa lên địa chỉ https cố định để điện thoại nạp được ở mọi WiFi, kể cả khi tắt máy này.
+        </p>
+      </div>
+      <div className="pages-body">
+        <input
+          className="search pages-input"
+          placeholder="https://github.com/<tên>/<repo>.git"
+          value={repo}
+          onChange={(e) => setRepo(e.target.value)}
+          aria-label="Repo GitHub Pages"
+        />
+        <label className="pages-auto">
+          <input type="checkbox" checked={auto} onChange={(e) => setAuto(e.target.checked)} /> Tự động đưa lên
+        </label>
+        <button type="button" className="btn btn-outline" onClick={save} disabled={busy}>
+          Lưu
+        </button>
+        <button type="button" className="btn btn-primary" onClick={publish} disabled={busy || !cfg.repo}>
+          Đưa lên ngay
+        </button>
+      </div>
+      {(st.message || cfg.url) && (
+        <p className="pages-note">
+          {st.message}
+          {cfg.url && (
+            <>
+              {' '}
+              Địa chỉ cho app: <code>{cfg.url}</code>
+            </>
+          )}
+        </p>
+      )}
+    </section>
   );
 }
 
@@ -613,6 +732,8 @@ export default function BundlesPanel({ apiBase = '/api', appName, onMessage, onE
         </div>
       </header>
 
+      <PagesCard onMessage={onMessage} onError={onError} />
+
       <section className="card card--table">
         <div className="card__head card__head--row">
           <div>
@@ -645,7 +766,7 @@ export default function BundlesPanel({ apiBase = '/api', appName, onMessage, onE
         ) : (
           <div className="bd-grid">
             {visible.map((m) => {
-              const liveV = m.versions.find((v) => v.version === m.live);
+              const liveV = m.versions.find((v) => v.id === m.live);
               const shown = liveV || m.versions[0];
               const platforms = [...new Set((liveV ? [liveV] : m.versions).flatMap((v) => v.platforms))];
               return (
@@ -659,7 +780,7 @@ export default function BundlesPanel({ apiBase = '/api', appName, onMessage, onE
                       <code>{m.key}</code>
                     </div>
                     <span className={`bd-badge ${m.live ? 'bd-badge--live' : ''}`}>
-                      <i /> {m.live ? `LIVE v${m.live}` : 'Chưa LIVE'}
+                      <i /> {liveV ? `LIVE v${liveV.version}${liveV.build > 1 ? ` · build ${liveV.build}` : ''}` : 'Chưa LIVE'}
                     </span>
                   </div>
 

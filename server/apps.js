@@ -150,6 +150,7 @@ export function createAppsStore({ root }) {
       }
       data.apps.splice(idx, 1);
       write(data);
+      app.get('pages')?.schedule();
       res.json({ message: 'Đã xóa ứng dụng cùng toàn bộ gói và bundle' });
     });
 

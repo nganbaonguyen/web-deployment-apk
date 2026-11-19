@@ -6,3 +6,5 @@ yarn.lock
 bundles/
 data/
 uploads/apps/
+.env
+storage/

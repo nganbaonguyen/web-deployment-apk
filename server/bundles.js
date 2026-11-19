@@ -14,7 +14,8 @@ import { execFile } from 'child_process';
 import { promisify } from 'util';
 
 const execFileAsync = promisify(execFile);
-const BUNDLE_PLATFORMS = ['ios', 'android'];
+export const BUNDLE_PLATFORMS = ['ios', 'android'];
+export const BUNDLE_ENVS = ['live', 'prod', 'staging'];
 const MODULE_KEY_RE = /^[a-z0-9][a-z0-9_-]{0,39}$/;
 const VERSION_RE = /^[0-9A-Za-z][0-9A-Za-z._-]{0,31}$/;
 
@@ -40,11 +41,26 @@ function ensureStore(ctx) {
   }
 }
 
-function readRegistry(ctx) {
+/** Mỗi lần upload là một "bản build" có id riêng (id = version cho bản đầu, "<version>-b2", "-b3"… cho các lần sau),
+ * nên cùng một version có thể upload nhiều file tar. Dữ liệu cũ (chưa có id/live) được chuyển đổi khi đọc. */
+function normalizeModule(mod) {
+  mod.versions = Array.isArray(mod.versions) ? mod.versions : [];
+  for (const v of mod.versions) {
+    if (!v.id) v.id = v.version;
+    if (!v.build) v.build = 1;
+    if (typeof v.live !== 'boolean') v.live = !!mod.live && mod.live === v.id;
+  }
+  delete mod.live;
+  return mod;
+}
+
+export function readRegistry(ctx) {
   ensureStore(ctx);
   try {
     const data = JSON.parse(fs.readFileSync(registryFile(ctx), 'utf8'));
-    return data && typeof data.modules === 'object' ? data : { modules: {} };
+    if (!data || typeof data.modules !== 'object') return { modules: {} };
+    for (const mod of Object.values(data.modules)) normalizeModule(mod);
+    return data;
   } catch {
     return { modules: {} };
   }
@@ -57,9 +73,19 @@ function writeRegistry(ctx, registry) {
   fs.renameSync(tmp, registryFile(ctx));
 }
 
+const byNewest = (a, b) => new Date(b.uploadedAt) - new Date(a.uploadedAt);
+
+/** Bản được phục vụ cho một môi trường: trong các bản đang tick (và Active, có nền tảng yêu cầu),
+ * lấy bản trên cùng của danh sách = mới upload nhất. Bỏ tick bản đó thì app quay về bản tick kế tiếp bên dưới. */
+export function pickServed(mod, env, platform) {
+  return [...mod.versions]
+    .filter((v) => v.active && v[env] && (!platform || v.platforms.includes(platform)))
+    .sort(byNewest)[0];
+}
+
 function publicModule(mod) {
-  const versions = [...mod.versions].sort((a, b) => new Date(b.uploadedAt) - new Date(a.uploadedAt));
-  return { ...mod, versions, live: mod.live || null };
+  const versions = [...mod.versions].sort(byNewest);
+  return { ...mod, versions, live: pickServed(mod, 'live')?.id || null };
 }
 
 function isInside(parent, child) {
@@ -172,9 +198,10 @@ export function createBundlesRouter() {
       if (!mod) {
         return res.status(404).json({ error: `Module "${key}" chưa được khai báo — bấm "Khai báo module" trước` });
       }
-      if (mod.versions.some((v) => v.version === version)) {
-        return res.status(409).json({ error: `Module "${key}" đã có phiên bản ${version}` });
-      }
+      // Cho phép upload lại cùng version (vd: sửa code mini app mà chưa tăng version): mỗi lần là một bản build mới
+      const sameVersion = mod.versions.filter((v) => v.version === version);
+      const build = sameVersion.length ? Math.max(...sameVersion.map((v) => v.build || 1)) + 1 : 1;
+      const id = build === 1 ? version : `${version}-b${build}`;
 
       await assertSafeTar(tarFile);
       tmpDir = fs.mkdtempSync(path.join(ctx.bundleDir, '.extract-'));
@@ -190,26 +217,45 @@ export function createBundlesRouter() {
       const platforms = BUNDLE_PLATFORMS.filter((p) =>
         fs.existsSync(path.join(bundleRoot, p, 'mf-manifest.json'))
       );
+      // App nạp mini app theo tên module (remote "work" đọc work.container.js.bundle), nên tên trong manifest phải
+      // trùng khóa module. Upload nhầm tar của mini app khác vào module này sẽ làm app báo "Failed to prefetch script".
+      for (const p of platforms) {
+        let manifestName = null;
+        try {
+          manifestName = JSON.parse(fs.readFileSync(path.join(bundleRoot, p, 'mf-manifest.json'), 'utf8')).name;
+        } catch {
+          /* manifest hỏng: để bước sau báo lỗi như cũ */
+        }
+        if (manifestName && manifestName !== key) {
+          throw new Error(
+            `Tar này là của mini app "${manifestName}", không phải "${key}". ` +
+              `Chọn đúng module "${manifestName}" hoặc chọn đúng file tar của "${key}".`
+          );
+        }
+      }
 
-      const dest = path.join(ctx.bundleDir, key, version);
+      const dest = path.join(ctx.bundleDir, key, id);
       if (!isInside(ctx.bundleDir, dest)) throw new Error('Đường dẫn đích không hợp lệ');
       fs.mkdirSync(dest, { recursive: true });
       for (const p of platforms) fs.renameSync(path.join(bundleRoot, p), path.join(dest, p));
 
       mod.versions.push({
+        id,
         version,
+        build,
         file: req.file.originalname,
         sizeBytes: req.file.size,
         uploadedAt: new Date().toISOString(),
         platforms,
         staging: true,
         prod: false,
+        live: goLive,
         active: true,
       });
-      if (goLive) mod.live = version;
       writeRegistry(ctx, registry);
+      req.app.get('pages')?.schedule();
 
-      res.json({ message: 'Upload bundle thành công', module: publicModule(mod), version, platforms });
+      res.json({ message: 'Upload bundle thành công', module: publicModule(mod), version, id, build, platforms });
     } catch (err) {
       res.status(400).json({ error: err.message || 'Upload bundle thất bại' });
     } finally {
@@ -218,7 +264,8 @@ export function createBundlesRouter() {
     }
   });
 
-  /** Lưu hàng loạt từ bảng lịch sử phiên bản: cờ STAGING/PROD, Active và bản LIVE. */
+  /** Lưu hàng loạt từ bảng lịch sử phiên bản: cờ STAGING/PROD/LIVE và Active của từng bản build.
+ * Có thể tick nhiều bản cùng môi trường: app nhận bản trên cùng (mới upload nhất) trong số đã tick. */
   router.patch('/bundles/:key/versions', (req, res) => {
     const ctx = req.appCtx;
     const registry = readRegistry(ctx);
@@ -227,29 +274,17 @@ export function createBundlesRouter() {
 
     const changes = Array.isArray(req.body?.changes) ? req.body.changes : [];
     for (const c of changes) {
-      const v = mod.versions.find((x) => x.version === c.version);
+      const v = mod.versions.find((x) => x.id === c.id);
       if (!v) continue;
       if (typeof c.staging === 'boolean') v.staging = c.staging;
       if (typeof c.prod === 'boolean') v.prod = c.prod;
+      if (typeof c.live === 'boolean') v.live = c.live;
       if (typeof c.active === 'boolean') v.active = c.active;
+      if (!v.active) v.live = false; // bản bị tắt Active thì không còn LIVE
     }
-
-    if (req.body && 'live' in req.body) {
-      const live = req.body.live;
-      if (live === null) {
-        mod.live = null;
-      } else {
-        const v = mod.versions.find((x) => x.version === live);
-        if (!v) return res.status(400).json({ error: `Không có phiên bản ${live}` });
-        if (!v.active) return res.status(400).json({ error: 'Phiên bản LIVE phải đang Active' });
-        mod.live = live;
-      }
-    }
-    // Bản bị tắt Active thì không thể là LIVE
-    const liveVersion = mod.versions.find((x) => x.version === mod.live);
-    if (mod.live && (!liveVersion || !liveVersion.active)) mod.live = null;
 
     writeRegistry(ctx, registry);
+    req.app.get('pages')?.schedule();
     res.json({ message: 'Đã lưu thay đổi', module: publicModule(mod) });
   });
 
@@ -257,14 +292,14 @@ export function createBundlesRouter() {
     const ctx = req.appCtx;
     const registry = readRegistry(ctx);
     const mod = registry.modules[req.params.key];
-    const idx = mod ? mod.versions.findIndex((v) => v.version === req.params.version) : -1;
+    const idx = mod ? mod.versions.findIndex((v) => v.id === req.params.version) : -1;
     if (idx < 0) return res.status(404).json({ error: 'Phiên bản không tồn tại' });
 
-    const dir = path.join(ctx.bundleDir, mod.key, mod.versions[idx].version);
+    const dir = path.join(ctx.bundleDir, mod.key, mod.versions[idx].id);
     if (isInside(ctx.bundleDir, dir)) fs.rmSync(dir, { recursive: true, force: true });
-    if (mod.live === mod.versions[idx].version) mod.live = null;
     mod.versions.splice(idx, 1);
     writeRegistry(ctx, registry);
+    req.app.get('pages')?.schedule();
     res.json({ message: 'Đã xóa phiên bản', module: publicModule(mod) });
   });
 
@@ -277,6 +312,7 @@ export function createBundlesRouter() {
     if (isInside(ctx.bundleDir, dir)) fs.rmSync(dir, { recursive: true, force: true });
     delete registry.modules[mod.key];
     writeRegistry(ctx, registry);
+    req.app.get('pages')?.schedule();
     res.json({ message: 'Đã xóa module' });
   });
 
@@ -289,13 +325,7 @@ export function createBundlesRouter() {
     if (!mod) return res.status(404).json({ error: 'Module không tồn tại' });
     if (!platform) return res.status(400).json({ error: 'Thiếu platform (ios hoặc android)' });
 
-    const servable = (v) => v.active && v.platforms.includes(platform);
-    const chosen =
-      env === 'live'
-        ? mod.versions.find((v) => v.version === mod.live && servable(v))
-        : [...mod.versions]
-            .filter((v) => v[env] && servable(v))
-            .sort((a, b) => new Date(b.uploadedAt) - new Date(a.uploadedAt))[0];
+    const chosen = pickServed(mod, env, platform);
     if (!chosen) {
       return res
         .status(404)
@@ -306,9 +336,10 @@ export function createBundlesRouter() {
       app: ctx.id,
       module: mod.key,
       version: chosen.version,
+      build: chosen.build,
       env,
       platform,
-      manifestUrl: `${baseUrlFor(req)}/bundles/${ctx.bundleUrlPrefix}${mod.key}/${chosen.version}/${platform}/mf-manifest.json`,
+      manifestUrl: `${baseUrlFor(req)}/bundles/${ctx.bundleUrlPrefix}${mod.key}/${chosen.id}/${platform}/mf-manifest.json`,
     });
   });
 
@@ -335,7 +366,7 @@ export function createBundleStatic(apps) {
       const ctx = apps.ctxFor(appId || 'electrogo');
       if (!ctx) return res.status(404).json({ error: 'Không tìm thấy bundle' });
       const [key, version] = rest;
-      const v = readRegistry(ctx).modules[key]?.versions.find((x) => x.version === version);
+      const v = readRegistry(ctx).modules[key]?.versions.find((x) => x.id === version);
       if (!v) return res.status(404).json({ error: 'Không tìm thấy bundle' });
       if (!v.active) return res.status(403).json({ error: 'Phiên bản này đã bị tắt Active' });
       next();

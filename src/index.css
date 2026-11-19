@@ -2121,3 +2121,57 @@ a {
     white-space: nowrap;
   }
 }
+
+/* ─── Khung GitHub Pages (tab Bundle) ─── */
+.pages-card {
+  margin-bottom: 1rem;
+}
+.pages-body {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.6rem;
+  padding: 0 1.6rem 0.4rem;
+}
+.pages-input {
+  flex: 1 1 320px;
+  width: auto;
+  border-radius: 10px;
+}
+.pages-auto {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  font-size: 0.82rem;
+  color: var(--text-soft);
+}
+.pages-note {
+  margin: 0;
+  padding: 0.4rem 1.6rem 1.2rem;
+  font-size: 0.8rem;
+  color: var(--muted);
+  word-break: break-all;
+}
+.pages-state {
+  margin-left: 0.5rem;
+  padding: 0.12rem 0.55rem;
+  font-size: 0.7rem;
+  font-weight: 600;
+  border-radius: 999px;
+  background: var(--surface-muted);
+  color: var(--muted);
+  vertical-align: middle;
+}
+.pages-state--ok {
+  background: #dcf7e6;
+  color: #12713a;
+}
+.pages-state--error {
+  background: #fde3e3;
+  color: #a32424;
+}
+.pages-state--queued,
+.pages-state--publishing {
+  background: #e3ecfd;
+  color: #1f4fb3;
+}

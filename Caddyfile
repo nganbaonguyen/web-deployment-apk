@@ -1,0 +1,9 @@
+# HTTPS tự động (Let's Encrypt) cho domain trong biến DOMAIN.
+{$DOMAIN} {
+	encode zstd gzip
+	# Cho phép upload file lớn (APK/IPA/bundle tối đa 500MB)
+	request_body {
+		max_size 520MB
+	}
+	reverse_proxy app:8080
+}

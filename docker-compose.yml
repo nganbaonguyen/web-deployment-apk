@@ -1,0 +1,37 @@
+# Chạy trên VPS: docker compose up -d --build
+# Cần file .env cùng thư mục (xem .env.example).
+
+services:
+  app:
+    build: .
+    restart: unless-stopped
+    environment:
+      ADMIN_USER: ${ADMIN_USER:-admin}
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD:?Đặt ADMIN_PASSWORD trong file .env}
+      PORT: "8080"
+    volumes:
+      # Dữ liệu thật nằm ở ./storage trên VPS: deploy lại không làm mất APK, bundle
+      - ./storage/uploads:/app/uploads
+      - ./storage/bundles:/app/bundles
+      - ./storage/data:/app/data
+    expose:
+      - "8080"
+
+  caddy:
+    image: caddy:2
+    restart: unless-stopped
+    depends_on:
+      - app
+    environment:
+      DOMAIN: ${DOMAIN:?Đặt DOMAIN trong file .env}
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+
+volumes:
+  caddy_data:
+  caddy_config:

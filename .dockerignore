@@ -1,0 +1,12 @@
+.git
+.github
+node_modules
+dist
+uploads
+bundles
+data
+storage
+.env
+*.log
+*.textClipping
+.DS_Store
