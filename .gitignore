@@ -8,3 +8,13 @@ data/
 uploads/apps/
 .env
 storage/
+
+# APK/IPA đã upload và trạng thái cục bộ của kho phân phối: dữ liệu thật của máy này, không đưa lên git
+uploads/*.apk
+uploads/*.ipa
+uploads/.public-url
+uploads/.active-package.json
+
+# Workflow deploy lên VPS (chạy mỗi lần push main, cần secret DEPLOY_HOST/USER/KEY).
+# Chỉ dùng khi đã dựng VPS: xóa dòng này rồi commit file .github/workflows/deploy.yml
+.github/
